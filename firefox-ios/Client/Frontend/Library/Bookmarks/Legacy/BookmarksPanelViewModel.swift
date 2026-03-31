@@ -1,0 +1,392 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/
+
+import Foundation
+import Common
+import Storage
+import Shared
+
+import class MozillaAppServices.BookmarkFolderData
+import class MozillaAppServices.BookmarkItemData
+import enum MozillaAppServices.BookmarkRoots
+
+@MainActor
+protocol BookmarksPanelViewModelProtocol: Sendable {
+    var profile: Profile { get }
+    var bookmarkNodes: [FxBookmarkNode] { get }
+    var bookmarkFolder: FxBookmarkNode? { get }
+    var bookmarkFolderGUID: GUID { get }
+    var displayedBookmarkNodes: [FxBookmarkNode] { get }
+    var isSearching: Bool { get }
+    var isRootNode: Bool { get }
+    var shouldFlashRow: Bool { get }
+
+    func resetSearch()
+    func searchBookmarks(query: String, completion: @escaping @MainActor @Sendable () -> Void)
+    func reloadData(completion: @escaping @MainActor () -> Void)
+    func addBookmark(bookmarkNode: FxBookmarkNode, atPosition position: Int)
+    func removeBookmark(atPosition position: Int)
+    func getSiteDetails(for indexPath: IndexPath, completion: @escaping @MainActor (Site?) -> Void)
+    func moveRow(at sourceIndexPath: IndexPath, to destinationIndexPath: IndexPath)
+    func createPinUnpinAction(
+        for site: Site,
+        isPinned: Bool,
+        successHandler: @escaping @MainActor (String) -> Void
+    ) -> PhotonRowActions
+}
+
+let LocalizedRootBookmarkFolderStrings = [
+    BookmarkRoots.MenuFolderGUID: String.BookmarksFolderTitleMenu,
+    BookmarkRoots.ToolbarFolderGUID: String.BookmarksFolderTitleToolbar,
+    BookmarkRoots.UnfiledFolderGUID: String.BookmarksFolderTitleUnsorted,
+    BookmarkRoots.MobileFolderGUID: String.BookmarksFolderTitleMobile,
+    LocalDesktopFolder.localDesktopFolderGuid: String.Bookmarks.Menu.DesktopBookmarks
+]
+
+@MainActor
+final class BookmarksPanelViewModel: BookmarksPanelViewModelProtocol {
+    enum BookmarksSection: Int, CaseIterable {
+        case bookmarks
+    }
+
+    var isRootNode: Bool {
+        return bookmarkFolderGUID == BookmarkRoots.MobileFolderGUID
+    }
+
+    let profile: Profile
+    let bookmarkFolderGUID: GUID
+    var bookmarkFolder: FxBookmarkNode?
+    var bookmarkNodes = [FxBookmarkNode]()
+    var isSearching = false
+    private var filteredBookmarkNodes = [FxBookmarkNode]()
+
+    /// The data source nodes currently displayed: filtered results when searching, otherwise the full bookmark nodes.
+    var displayedBookmarkNodes: [FxBookmarkNode] {
+        return isSearching ? filteredBookmarkNodes : bookmarkNodes
+    }
+
+    private var hasDesktopFolders = false
+    private var bookmarksHandler: BookmarksHandler
+    private var flashLastRowOnNextReload = false
+    private let logger: Logger
+
+    /// By default our root folder is the mobile folder. Desktop folders are shown in the local desktop folders.
+    init(profile: Profile,
+         bookmarksHandler: BookmarksHandler,
+         bookmarkFolderGUID: GUID = BookmarkRoots.MobileFolderGUID,
+         logger: Logger = DefaultLogger.shared) {
+        self.profile = profile
+        self.bookmarksHandler = bookmarksHandler
+        self.bookmarkFolderGUID = bookmarkFolderGUID
+        self.logger = logger
+    }
+
+    var shouldFlashRow: Bool {
+        guard flashLastRowOnNextReload else { return false }
+        flashLastRowOnNextReload = false
+
+        return true
+    }
+
+    func reloadData(completion: @escaping @MainActor () -> Void) {
+        // Can be called while app backgrounded and the db closed, don't try to reload the data source in this case
+        if profile.isShutdown {
+            completion()
+            return
+        }
+
+        if bookmarkFolderGUID == BookmarkRoots.MobileFolderGUID {
+            setupMobileFolderData(completion: completion)
+        } else if bookmarkFolderGUID == LocalDesktopFolder.localDesktopFolderGuid {
+            setupLocalDesktopFolderData(completion: completion)
+        } else {
+            setupSubfolderData(completion: completion)
+        }
+    }
+
+    func didAddBookmarkNode() {
+        flashLastRowOnNextReload = true
+    }
+
+    func moveRow(at sourceIndexPath: IndexPath, to destinationIndexPath: IndexPath) {
+        guard let bookmarkNode = bookmarkNodes[safe: sourceIndexPath.row] else {
+            logger.log("Could not move row from \(sourceIndexPath) to \(destinationIndexPath)",
+                       level: .debug,
+                       category: .library)
+            return
+        }
+
+        let newIndex = getNewIndex(from: destinationIndexPath.row)
+        _ = bookmarksHandler.updateBookmarkNode(guid: bookmarkNode.guid,
+                                                parentGUID: nil,
+                                                position: UInt32(newIndex),
+                                                title: nil,
+                                                url: nil)
+
+        bookmarkNodes.remove(at: sourceIndexPath.row)
+        bookmarkNodes.insert(bookmarkNode, at: destinationIndexPath.row)
+    }
+
+    func getSiteDetails(for indexPath: IndexPath, completion: @escaping @MainActor (Site?) -> Void) {
+        guard let bookmarkNode = displayedBookmarkNodes[safe: indexPath.row],
+              let bookmarkItem = bookmarkNode as? BookmarkItemData
+        else {
+            logger.log("Could not get site details for indexPath \(indexPath)",
+                       level: .debug,
+                       category: .library)
+            completion(nil)
+            return
+        }
+
+        checkIfPinnedURL(bookmarkItem.url) { [weak self] isPinned in
+            guard let site = self?.createSite(isPinned: isPinned, bookmarkItem: bookmarkItem) else { return }
+            completion(site)
+        }
+    }
+
+    func createPinUnpinAction(
+        for site: Site,
+        isPinned: Bool,
+        successHandler: @escaping @MainActor (String) -> Void
+    ) -> PhotonRowActions {
+        return SingleActionViewModel(
+            title: isPinned ? .Bookmarks.Menu.RemoveFromShortcutsTitle : .AddToShortcutsActionTitle,
+            iconString: isPinned ? StandardImageIdentifiers.Large.pinSlash : StandardImageIdentifiers.Large.pin,
+            tapHandler: { [weak self] _ in
+                guard let profile = self?.profile, let logger = self?.logger else { return }
+                let action = isPinned
+                ? profile.pinnedSites.removeFromPinnedTopSites(site)
+                : profile.pinnedSites.addPinnedTopSite(site)
+
+                action.uponQueue(.main) { result in
+                    // FXIOS-13228 It should be safe to assumeIsolated here because of `.main` queue above
+                    MainActor.assumeIsolated {
+                        if result.isSuccess {
+                            let message: String = isPinned
+                            ? .LegacyAppMenu.RemovePinFromShortcutsConfirmMessage
+                            : .LegacyAppMenu.AddPinToShortcutsConfirmMessage
+                            successHandler(message)
+                        } else {
+                            let logMessage = isPinned ? "Could not remove pinned site" : "Could not add pinne site"
+                            logger.log(logMessage, level: .debug, category: .library)
+                        }
+                    }
+                }
+            }
+        ).items
+    }
+
+    // MARK: - Search
+
+    /// Recursively searches all bookmarks under the current folder (and its subfolders)
+    /// for items whose title or URL contains the given query string (case-insensitive).
+    func searchBookmarks(query: String, completion: @escaping @MainActor () -> Void) {
+        guard !query.isEmpty else {
+            isSearching = true
+            filteredBookmarkNodes = []
+            completion()
+            return
+        }
+
+        bookmarksHandler
+            .getBookmarksTree(rootGUID: bookmarkFolderGUID, recursive: true)
+            .uponQueue(.main) { [weak self] result in
+                // FXIOS-13228 It should be safe to assumeIsolated here because of `.main` queue above
+                MainActor.assumeIsolated {
+                    switch result {
+                    case .success(let nodeData):
+                        guard let folderData = nodeData as? BookmarkFolderData else {
+                            self?.logger.log("Search bookmarks tree fetch failed",
+                                             level: .debug,
+                                             category: .library)
+                            completion()
+                            return
+                        }
+
+                        let lowercasedQuery = query.lowercased()
+                        var matches = [FxBookmarkNode]()
+                        self?.collectMatchingBookmarks(from: folderData,
+                                                       query: lowercasedQuery,
+                                                       results: &matches)
+
+                        self?.isSearching = true
+                        self?.filteredBookmarkNodes = matches
+
+                        completion()
+
+                    case .failure(let error):
+                        self?.logger.log("Search bookmarks tree fetch error: \(error)",
+                                         level: .debug,
+                                         category: .library)
+
+                        self?.isSearching = true
+                        self?.filteredBookmarkNodes = []
+                        completion()
+                    }
+                }
+            }
+    }
+
+    /// Recursively traverses the bookmark tree collecting BookmarkItemData nodes
+    /// whose title or URL matches the search query.
+    private func collectMatchingBookmarks(from folder: BookmarkFolderData,
+                                          query: String,
+                                          results: inout [FxBookmarkNode]) {
+        guard let children = folder.children else { return }
+
+        for child in children {
+            if let item = child as? BookmarkItemData {
+                if item.title.lowercased().contains(query) ||
+                    item.url.lowercased().contains(query) {
+                    results.append(item)
+                }
+            } else if let subfolder = child as? BookmarkFolderData {
+                collectMatchingBookmarks(from: subfolder, query: query, results: &results)
+            }
+            // Skip separators
+        }
+    }
+
+    // MARK: - Private
+
+    /// Since we have a Local Desktop folder that isn't referenced in A-S under the mobile folder,
+    /// we need to account for this when saving bookmark index in A-S. This is done by subtracting
+    /// the Local Desktop Folder number of rows it takes to the actual index.
+    func getNewIndex(from index: Int) -> Int {
+        guard bookmarkFolderGUID == BookmarkRoots.MobileFolderGUID, hasDesktopFolders else {
+            return max(index, 0)
+        }
+
+        // Ensure we don't return lower than 0
+        return max(index - LocalDesktopFolder.numberOfRowsTaken, 0)
+    }
+
+    private func setupMobileFolderData(completion: @escaping @MainActor () -> Void) {
+        bookmarksHandler
+            .getBookmarksTree(rootGUID: BookmarkRoots.MobileFolderGUID, recursive: false)
+            .uponQueue(.main) { result in
+                // FXIOS-13228 It should be safe to assumeIsolated here because of `.main` queue above
+                MainActor.assumeIsolated {
+                    guard let mobileFolder = result.successValue as? BookmarkFolderData else {
+                        self.logger.log("Mobile folder data setup failed \(String(describing: result.failureValue))",
+                                        level: .debug,
+                                        category: .library)
+                        self.setErrorCase()
+                        completion()
+                        return
+                    }
+
+                    self.bookmarkFolder = mobileFolder
+                    self.bookmarkNodes = mobileFolder.fxChildren ?? []
+
+                    self.createDesktopBookmarksFolder(completion: completion)
+                }
+            }
+    }
+
+    /// Local desktop folder data is a folder that only exists locally in the application
+    /// It contains the three desktop folder of "unfiled", "menu" and "toolbar"
+    private func setupLocalDesktopFolderData(completion: () -> Void) {
+        let unfiled = LocalDesktopFolder(forcedGuid: BookmarkRoots.UnfiledFolderGUID)
+        let toolbar = LocalDesktopFolder(forcedGuid: BookmarkRoots.ToolbarFolderGUID)
+        let menu = LocalDesktopFolder(forcedGuid: BookmarkRoots.MenuFolderGUID)
+
+        self.bookmarkFolder = nil
+        self.bookmarkNodes = [unfiled, toolbar, menu]
+        completion()
+    }
+
+    /// Subfolder data case happens when we select a folder created by a user
+    private func setupSubfolderData(completion: @escaping @MainActor () -> Void) {
+        bookmarksHandler.getBookmarksTree(rootGUID: bookmarkFolderGUID,
+                                          recursive: false)
+        .uponQueue(.main) { result in
+            // FXIOS-13228 It should be safe to assumeIsolated here because of `.main` queue above
+            MainActor.assumeIsolated {
+                guard let folder = result.successValue as? BookmarkFolderData else {
+                    self.logger.log("Subfolder data setup failed \(String(describing: result.failureValue))",
+                                    level: .debug,
+                                    category: .library)
+                    self.setErrorCase()
+                    completion()
+                    return
+                }
+
+                self.bookmarkFolder = folder
+                self.bookmarkNodes = folder.fxChildren ?? []
+
+                completion()
+            }
+        }
+    }
+
+    /// Error case at the moment is setting data to nil and showing nothing
+    private func setErrorCase() {
+        self.bookmarkFolder = nil
+        self.bookmarkNodes = []
+    }
+
+    // Create a local "Desktop bookmarks" folder only if there exists a bookmark in one of it's nested
+    // subfolders
+    private func createDesktopBookmarksFolder(completion: @escaping @MainActor () -> Void) {
+        bookmarksHandler.countBookmarksInTrees(folderGuids: BookmarkRoots.DesktopRoots.map { $0 }) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let bookmarkCount):
+                    if bookmarkCount > 0 {
+                        self.hasDesktopFolders = true
+                        let desktopFolder = LocalDesktopFolder()
+                        self.bookmarkNodes.insert(desktopFolder, at: 0)
+                    } else {
+                        self.hasDesktopFolders = false
+                    }
+                case .failure(let error):
+                    self.logger.log("Error counting bookmarks: \(error)", level: .debug, category: .library)
+                }
+                completion()
+            }
+        }
+    }
+
+    private func checkIfPinnedURL(
+        _ url: String,
+        completion: @escaping @MainActor  (Bool) -> Void
+    ) {
+        profile.pinnedSites.isPinnedTopSite(url)
+            .uponQueue(.main) { result in
+                // FXIOS-13228 It should be safe to assumeIsolated here because of `.main` queue above
+                MainActor.assumeIsolated {
+                    completion(result.successValue ?? false)
+                }
+            }
+    }
+
+    private func createSite(isPinned: Bool, bookmarkItem: BookmarkItemData) -> Site {
+        guard isPinned else {
+            return Site.createBasicSite(
+                url: bookmarkItem.url,
+                title: bookmarkItem.title,
+                isBookmarked: true
+            )
+        }
+        return Site.createPinnedSite(
+            url: bookmarkItem.url,
+            title: bookmarkItem.title,
+            isGooglePinnedTile: false
+        )
+    }
+
+    func resetSearch() {
+        isSearching = false
+        filteredBookmarkNodes.removeAll()
+    }
+
+    func addBookmark(bookmarkNode: FxBookmarkNode, atPosition position: Int) {
+        bookmarkNodes.insert(bookmarkNode, at: position)
+    }
+
+    func removeBookmark(atPosition position: Int) {
+        bookmarkNodes.remove(at: position)
+    }
+}

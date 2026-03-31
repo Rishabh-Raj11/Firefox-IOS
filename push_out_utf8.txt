@@ -1,0 +1,34 @@
+﻿git : remote: fatal: 
+did not receive 
+expected object 8308f2
+f871dc681d005fef6f1c79
+e7513177ffe2        
+At line:1 char:1
++ git push -u origin 
+main --force > 
+push_out.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
+    + CategoryInfo    
+          : NotSpeci  
+  fied: (remote: fa   
+ tal: ...177ffe2      
+      :String) []    
+, RemoteException
+    + FullyQualifiedE 
+   rrorId : NativeCo  
+  mmandError
+ 
+error: remote unpack 
+failed: index-pack 
+failed
+To https://github.com/
+Rishabh-Raj11/Firefox-
+IOS.git
+ ! [remote rejected] 
+main -> main (failed)
+error: failed to push 
+some refs to 'https://
+github.com/Rishabh-Raj
+11/Firefox-IOS.git'

@@ -1,0 +1,60 @@
+---
+# The features to be included in the nimbus.fml will be listed
+# in the `include` block. This should not be a manual process.
+# Please see the documentation in `iOSNimbusFeatureUtility`
+# for more information
+about:
+  description: The root level Feature Manifest for Firefox for iOS
+  ios:
+    class: FxNimbus
+    module: Client
+channels:
+  - developer
+  - beta
+  - release
+include:
+
+
+  - nimbus-features/addressAutofillFeature.yaml
+  - nimbus-features/adsClient.yaml
+  - nimbus-features/aiKillSwitchFeature.yaml
+  - nimbus-features/appIconSelectionFeature.yaml
+  - nimbus-features/bookmarksSearchFeature.yaml
+  - nimbus-features/deeplinkOptimizationRefactorFeature.yaml
+  - nimbus-features/defaultZoomFeature.yaml
+  - nimbus-features/downloadLiveActivitiesFeature.yaml
+  - nimbus-features/feltPrivacyFeature.yaml
+  - nimbus-features/firefoxJpGuideDefaultSite.yaml
+  - nimbus-features/firefoxSuggestFeature.yaml
+  - nimbus-features/generalFeatures.yaml
+  - nimbus-features/hntSponsoredShortcutsFeature.yaml
+  - nimbus-features/homepageRedesignFeature.yaml
+  - nimbus-features/hostedSummarizerFeature.yaml
+  - nimbus-features/improvedAppStoreReviewTriggerFeature.yaml
+  - nimbus-features/messagingFeature.yaml
+  - nimbus-features/microsurveyFeature.yaml
+  - nimbus-features/nativeErrorPageFeature.yaml
+  - nimbus-features/needsReloadRefactor.yaml
+  - nimbus-features/newAddressBarMenu.yaml
+  - nimbus-features/newAppearanceMenu.yaml
+  - nimbus-features/onboardingFrameworkFeature.yaml
+  - nimbus-features/quickAnswersFeature.yaml
+  - nimbus-features/recentSearchesFeature.yaml
+  - nimbus-features/relayIntegrationFeature.yaml
+  - nimbus-features/searchFeature.yaml
+  - nimbus-features/sentFromFirefoxFeature.yaml
+  - nimbus-features/snapkitRemovalRefactor.yaml
+  - nimbus-features/splashScreenFeature.yaml
+  - nimbus-features/spotlightSearchFeature.yaml
+  - nimbus-features/startAtHomeFeature.yaml
+  - nimbus-features/summarizerAppAttestAuthFeature.yaml
+  - nimbus-features/summarizerLanguageExpansionFeature.yaml
+  - nimbus-features/summarizerPermissiveGuardrailsFeature.yaml
+  - nimbus-features/tabScrollRefactorFeature.yaml
+  - nimbus-features/tabTrayUIExperiments.yaml
+  - nimbus-features/toolbarRefactorFeature.yaml
+  - nimbus-features/tosFeature.yaml
+  - nimbus-features/touFeature.yaml
+  - nimbus-features/trackingProtectionRefactor.yaml
+  - nimbus-features/translationsFeature.yaml
+  - nimbus-features/trendingSearchesFeature.yaml
